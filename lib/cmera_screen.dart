@@ -1,7 +1,12 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:camera/camera.dart';
-//import 'package:firebase_ml_vision/firebase_ml_vision.dart';
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_ml_kit/google_ml_kit.dart';
+
 
 import 'result_screen.dart';
 
@@ -18,6 +23,71 @@ class _CameraScreenState extends State<CameraScreen> {
   late Future<void> _initializeControllerFuture;
   bool isFlashOn = false;
 
+  String? _currentAddress = "";
+  Position? _currentPosition;
+
+  Future<bool> _handleLocationPermission() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Location services are disabled. Please enable the services')));
+      return false;
+    }
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Location permissions are denied')));
+        return false;
+      }
+    }
+    if (permission == LocationPermission.deniedForever) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Location permissions are permanently denied, we cannot request permissions.')));
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _getCurrentPosition() async {
+    final hasPermission = await _handleLocationPermission();
+
+    if (!hasPermission) return;
+    await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high)
+        .then((Position position) {
+      setState(() => _currentPosition = position);
+      _getAddressFromLatLng(_currentPosition!);
+    }).catchError((e) {
+      debugPrint(e);
+    });
+  }
+
+  Future<void> _getAddressFromLatLng(Position position) async {
+    await placemarkFromCoordinates(
+            _currentPosition!.latitude, _currentPosition!.longitude)
+        .then((List<Placemark> placemarks) {
+      Placemark place = placemarks[0];
+      setState(() {
+        _currentAddress =
+            '${place.street}, ${place.subLocality}, ${place.subAdministrativeArea}, ${place.postalCode}';
+      });
+    }).catchError((e) {
+      debugPrint(e);
+    });
+  }
+
+  getTime() {
+    DateTime now = DateTime.now();
+    String dateString = now.toString();
+    print("Current date and time: $dateString");
+  }
+
   @override
   void initState() {
     super.initState();
@@ -32,6 +102,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
     // Next, initialize the controller. This returns a Future.
     _initializeControllerFuture = _controller.initialize();
+    _controller.setFlashMode(FlashMode.off);
+    _getCurrentPosition();
   }
 
   @override
@@ -46,22 +118,22 @@ class _CameraScreenState extends State<CameraScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Camera OCR'),
-        actions: [
-          // IconButton(
-          //   onPressed: () {
-          //     _toggleFlash();
-          //   },
-          //   icon: Icon(
-          //     isFlashOn ? Icons.flash_on : Icons.flash_off,
-          //   ),
-          // ),
-          Switch(
-      value: isFlashOn,
-      onChanged: (value) {
-        _toggleFlashManually();
-      },
-    ),
-        ],
+        // actions: [
+        //   // IconButton(
+        //   //   onPressed: () {
+        //   //     _toggleFlash();
+        //   //   },
+        //   //   icon: Icon(
+        //   //     isFlashOn ? Icons.flash_on : Icons.flash_off,
+        //   //   ),
+        //   // ),
+        //   Switch(
+        //     value: isFlashOn,
+        //     onChanged: (value) {
+        //       _toggleFlashManually();
+        //     },
+        //   ),
+        // ],
       ),
       body: FutureBuilder<void>(
         future: _initializeControllerFuture,
@@ -80,7 +152,7 @@ class _CameraScreenState extends State<CameraScreen> {
           try {
             // Ensure the camera is initialized
             await _initializeControllerFuture;
-          //  await _toggleFlash();
+            //  await _toggleFlash();
 
             // Capture the image
             final image = await _controller.takePicture();
@@ -125,20 +197,22 @@ class _CameraScreenState extends State<CameraScreen> {
 //   }
 // }
 
-void _toggleFlashManually() async {
-  if (!_controller.value.isInitialized) {
-    return;
+  void _toggleFlashManually() async {
+    if (!_controller.value.isInitialized) {
+      return;
+    }
+
+    try {
+      await _controller
+          .setFlashMode(isFlashOn ? FlashMode.off : FlashMode.torch);
+      setState(() {
+        isFlashOn = !isFlashOn;
+      });
+    } catch (e) {
+      print("Error toggling flash: $e");
+    }
   }
 
-  try {
-    await _controller.setFlashMode(isFlashOn ? FlashMode.off : FlashMode.torch);
-    setState(() {
-      isFlashOn = !isFlashOn;
-    });
-  } catch (e) {
-    print("Error toggling flash: $e");
-  }
-}
   Future<void> _toggleFlash() async {
     if (!_controller.value.isInitialized) {
       return;
@@ -161,6 +235,10 @@ void _toggleFlashManually() async {
 
     // Initialize the text recognizer
     final textRecognizer = GoogleMlKit.vision.textRecognizer();
+    final File imageFile = File(imagePath);
+    List<int> imageBytes = imageFile.readAsBytesSync();
+    String base64Image = base64Encode(imageBytes);
+    print(base64Image);
 
     try {
       // Process the image and get the recognized text
@@ -170,10 +248,18 @@ void _toggleFlashManually() async {
       // Extract and print the recognized text
       String extractedText = recognisedText.text;
       print("Extracted Text:\n$extractedText");
+      setState(() {
+        isFlashOn = false;
+      });
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => ResultPage(extractedText: extractedText),
+          builder: (context) => ResultPage(
+            extractedText: extractedText,
+            imagePath: imagePath,
+            address: _currentAddress!,
+            base64Image: base64Image,
+          ),
         ),
       );
     } catch (e) {
